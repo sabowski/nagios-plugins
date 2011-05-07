@@ -1,0 +1,88 @@
+#!/usr/bin/env ruby
+# nagios plugin that connects to a redis server and checks
+# the length of the specified resque queue
+
+require 'rubygems'
+require 'resque'
+require 'optparse'
+
+options = {}
+# required command line arguments
+required = [:host, :warning, :critical]
+
+# collect the arguments
+parser = OptionParser.new do |opts|
+    opts.banner = "Usage: check_resque_queue [options]"
+    opts.on("-h", "--host <redis host>", "Host name of the redis server") do |host_opt|
+        options[:host] = host_opt
+    end
+
+    opts.on("-p", "--port <redis port>", "Redis port, defaults to 6379") do |port_opt|
+        options[:port] = port_opt.to_i
+    end
+
+    opts.on("-q", "--queue <queue name>", "Name of the queue to check") do |queue_opt|
+        options[:queue] = queue_opt
+    end
+
+    opts.on("-w","--warning <warning threshold>", "Warning level threshold") do |warning_opt|
+        options[:warning] = warning_opt.to_i
+    end
+
+    opts.on("-c","--critical <critical threshold>", "Critical level threshold") do |critical_opt|
+        options[:critical] = critical_opt.to_i
+    end
+end
+
+# parse the arguments
+parser.parse!
+
+# exit if required args not given
+if !required.all? { |k| options.has_key?(k) }
+	puts parser.to_s
+	exit 3
+end
+
+# complain if warning is higher than critical
+if( options[:warning] > options[:critical] )
+	puts "ERROR: warning threshold higher than critical threshold"
+	exit 3
+end
+
+# if port wasn't specified, set it to the default value
+options[:port] = 6379 if options[:port].nil?
+
+# here we go!
+begin
+    # open connection to redis server
+    redis = Redis.new( :host => options[:host], :port => options[:port] )
+    Resque.redis = redis
+
+    # if key/queue does not exist, exit
+    if( !Resque.queues.include?( options[:queue] ))
+        puts "ERROR: Queue name specified does not exist"
+        exit 3
+    end
+
+    # key exists, now get the length of the queue
+		length_val= Resque.size(options[:queue])
+
+		# return the appropiate check code
+		case length_val
+			when 0...options[:warning]
+				puts "QUEUE LENGTH OK: #{length_val}"
+				exit 0
+			when options[:warning]...options[:critical]
+				puts "QUEUE LENGTH WARNING: #{length_val}"
+				exit 1
+			else
+				puts "QUEUE LENGTH CRITICAL: #{length_val}"
+				exit 2
+		end
+
+# recover from a refused connection
+rescue Errno::ECONNREFUSED
+    puts "ERROR: TCP Connection Refused"
+    exit 3
+end
+

@@ -1,0 +1,53 @@
+#!/usr/bin/env ruby
+# nagios plugin that connects to a redis server and returns the
+# amount of memory being used (used_human_memory)
+
+require 'socket'
+
+# command line arguments
+host,port,warning,critical = ARGV[0], ARGV[1], ARGV[2].to_i, ARGV[3].to_i
+
+# make sure required args have been given
+if ( host.nil? || port.nil? )
+	puts "UNKNOWN - bad arguments"
+	exit 3
+end
+
+begin
+	# open connection to redis server and send "INFO" command
+	redis_socket = TCPSocket.open( host, port );
+	redis_socket.puts("INFO");
+
+	# loop through each key returned by INFO until we get what we want
+	while ( (data = redis_socket.gets) !~ /^\s*$/ )
+		(key, value) = data.chomp.split(':')
+		if (key == "used_memory")
+			redis_used_memory = value.to_i
+		end
+	end
+
+	redis_socket.close
+
+	# convert to mb (value is given in bytes, divide by 1024 twice
+	# to get mb)
+	redis_used_memory /= (1024*1024)
+
+	# check to see if the memory usage exceeds defined warning and
+	# critical values
+	if ( !critical.nil? && (redis_used_memory > critical ))
+		puts "MEMORY CRITICAL - #{redis_used_memory}M"
+		exit 2
+	elsif ( !warning.nil? && ( redis_used_memory > warning ))
+		puts "MEMORY WARNING - #{redis_used_memory}M"
+		exit 1
+	end
+	
+	# memory usage appears to be OK
+	puts "MEMORY OK - #{redis_used_memory}M"
+	exit 0
+
+# recover from refused connection
+rescue Errno::ECONNREFUSED
+	puts "UNKNOWN - Connection Refused"
+	exit 3
+end

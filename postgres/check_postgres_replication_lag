@@ -1,0 +1,165 @@
+#!/usr/bin/env ruby
+# script to check the replication lag for postgres
+# assumes that both master and slave have same login credentials
+
+require 'rubygems'
+require 'optparse'
+require 'pg'
+
+# calulate the position of the log from the hex values postgres gives
+# this process is not really documents, the offical postgres docs don't
+# really explain how to compare the values to see how much lag there is
+# the process here was borrowed from
+# http://munin-monitoring.org/browser/trunk/plugins/node.d/postgres_streaming_.in?rev=3905
+# 
+# ( this code is in perl)
+# sub CalculateNumericalOffset
+# {
+#     my $stringofs = shift;
+# 
+#     my @pieces = split /\//, $stringofs;
+#	    die "Invalid offset: $stringofs" unless ($#pieces == 1);
+# 
+#     # First part is logid, second part is record offset
+#     return (hex("ffffffff") * hex($pieces[0])) + hex($pieces[1]);
+# }
+def calculate_numerical_offset( db_value )
+		split_vals = db_value.split('/')
+		# 4294967295 is ffffffff in decimal
+		return (4294967295 * split_vals[0].hex ) + split_vals[1].hex
+end
+
+options = {}
+# required command line arguments
+required = [:masterhost, :slavehost, :type, :database, :dbuser, :dbpass, :warning, :critical]
+
+# collect the arguments
+parser = OptionParser.new do |opts|
+	opts.banner = "Usage: check_postgres_replication_lag [options]"
+	opts.on("-H", "--host <postgres host>","Hostname/IP of the postgres master server") do |opt|
+		options[:masterhost] = opt
+	end
+
+	opts.on("-S", "--slavehost <postgres slave>", "Hostname/IP of the postgres slave server") do |opt|
+		options[:slavehost] = opt
+	end
+
+	opts.on("-P", "--port <postgres port>", "Postgres port, defaults to 5432") do |opt|
+		options[:port] = opt.to_i
+	end
+
+	opts.on("-t", "--type <check type>", "Lag check type (receive or replay)") do |opt|
+		if( opt == "receive" || opt == "replay")
+			options[:type] = opt
+		end
+	end
+
+	opts.on("-d", "--database <database name>", "Name of database to connect to") do |opt|
+		options[:database] = opt
+	end
+
+	opts.on("-l", "--logname <db username>", "User to connect to database as") do |opt|
+		options[:dbuser] = opt
+	end
+
+	opts.on("-p", "--password <db password", "Password for database user") do |opt|
+		options[:dbpass] = opt
+	end
+
+	opts.on("-w", "--warning <warning threshold>", "Warning level threshold") do |opt|
+		options[:warning] = opt.to_i
+	end
+
+	opts.on("-c", "--critical <critical threshold>", "Critical level threshold") do |opt|
+		options[:critical] = opt.to_i
+	end
+end
+
+# parse args
+parser.parse!
+
+# exit if required args not given
+if !required.all? { |k| options.has_key?(k) }
+	puts parser.to_s
+	exit 3
+end
+
+# complain if warning is higher than critical
+if( options[:warning] > options[:critical] )
+		puts "WARNING: warning threshold higher than critical threshold"
+		exit 3
+end
+
+# if port isn't specified, set it here
+options[:port] = 5432 if options[:port].nil?
+
+# database connection parameters
+# everything except the hostname is the same
+db_master_params = { :host => options[:masterhost],
+				:port => options[:port],
+				:dbname => options[:database],
+				:user => options[:dbuser],
+				:password => options[:dbpass] }
+
+db_slave_params = { :host => options[:slavehost],
+				:port => options[:port],
+				:dbname => options[:database],
+				:user => options[:dbuser],
+				:password => options[:dbpass] }
+
+# the main event
+begin
+	#open connection to master database
+	db_conn = PGconn.connect( db_master_params )
+
+	# run SQL to get the xlog location on master
+	master_xlog_location = db_conn.exec("SELECT pg_current_xlog_location()")[0]['pg_current_xlog_location']
+
+	# that's all we need from there, close the connection and open a new one to
+	# the slave server
+	db_conn.close
+	db_conn = PGconn.connect( db_slave_params );
+
+	# check to see what type of lag check this is, so that we
+	# pull the right value from the slave database
+	# TODO: there has got to be a better way to do this, but my attempts were futile...
+	if ( options[:type] == "receive" ) ^ ( options[:type] == "replay" )
+		slave_xlog_location = db_conn.exec("SELECT pg_last_xlog_#{options[:type]}_location()")[0]['pg_last_xlog_receive_location']
+	else
+		# something went wrong!
+		puts "ERROR: could not understand lag check type"
+		exit 3
+	end
+
+rescue PGError => e
+	# do exception stuff
+	puts "#{e}"
+ensure
+	db_conn.close
+end
+
+# make sure we got real values from the database
+if( master_xlog_location.nil? || slave_xlog_location.nil? )
+		puts "UNKNOWN ERROR: did not properly extract values from the database"
+		exit 3
+end
+
+replication_lag = calculate_numerical_offset( master_xlog_location ) - calculate_numerical_offset( slave_xlog_location )
+
+# make sure lag isn't negative
+if( replication_lag < 0 )
+	puts "ERROR: negative lag!"
+	exit 3
+end
+
+case replication_lag
+	when 0...options[:warning]
+		puts "OK: replication lag is #{replication_lag}"
+		exit 0
+	when options[:warning]...options[:critical]
+		puts "WARNING: replication lag is #{replication_lag}"
+		exit 1
+	else
+		puts "CRITICAL: replication lag is #{replication_lag}"
+		exit 2
+end

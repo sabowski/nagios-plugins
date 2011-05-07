@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+# nagios plugin that connects to a redis server and returns the
+# number of connected clients
+
+require 'socket'
+
+# command line arguments
+host,port,warning,critical = ARGV[0], ARGV[1], ARGV[2].to_i, ARGV[3].to_i
+
+# make sure required args have been given
+if ( host.nil? || port.nil? )
+	puts "UNKNOWN - bad arguments"
+	exit 3
+end
+
+begin
+	# open connection to redis server and send "INFO" command
+	redis_socket = TCPSocket.open( host, port );
+	redis_socket.puts("INFO");
+
+	# loop through each key returned by INFO until we get what we want
+	while ( (data = redis_socket.gets) !~ /^\s*$/ )
+		(key, value) = data.chomp.split(':')
+		if (key == "connected_clients")
+			redis_conn_clients = value.to_i
+		end
+	end
+
+	redis_socket.close
+
+	# check to see if the number of connected clients exceeds specified warning and
+	# critical values
+	if ( !critical.nil? && (redis_conn_clients > critical ))
+		puts "CONNECTIONS CRITICAL - #{redis_conn_clients} connected clients"
+		exit 2
+	elsif ( !warning.nil? && ( redis_conn_clients > warning ))
+		puts "CONNECTIONS WARNING - #{redis_conn_clients} connected clients"
+		exit 1
+	end
+	
+	# number of clients  appears to be OK
+	puts "CONNECTIONS OK - #{redis_conn_clients} connected clients"
+	exit 0
+
+# recover from refused connection
+rescue Errno::ECONNREFUSED
+	puts "UNKNOWN - Connection Refused"
+	exit 3
+end
